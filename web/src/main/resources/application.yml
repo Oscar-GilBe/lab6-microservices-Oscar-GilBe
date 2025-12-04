@@ -27,3 +27,38 @@ management:
         # Exposes Actuator endpoints for health checks and metrics.
         include: "*" # Enable all endpoints by default
 
+# Resilience4j Circuit Breaker Configuration
+resilience4j:
+  circuitbreaker:
+    instances:
+      accounts-service:
+        # Minimum number of calls required before the circuit breaker can calculate the error rate
+        # At least 5 calls must occur before Resilience4j evaluates whether to open the circuit
+        minimumNumberOfCalls: 5
+        # Failure rate threshold in percentage (50% = circuit opens if 50% of calls fail)
+        failureRateThreshold: 50
+        # Time in seconds the circuit breaker should wait before transitioning from open to half-open
+        waitDurationInOpenState: 15s
+        # Number of permitted calls when the circuit breaker is half-open
+        # If all these calls succeed, the circuit breaker closes again and works normally
+        # If at least 1 fails, reopen
+        permittedNumberOfCallsInHalfOpenState: 3
+        # Size of the sliding window which is used to record the outcome of calls
+        slidingWindowSize: 10
+        # Type of sliding window: COUNT_BASED or TIME_BASED
+        slidingWindowType: COUNT_BASED
+        # Automatically transitions from OPEN to HALF_OPEN state after waitDurationInOpenState
+        automaticTransitionFromOpenToHalfOpenEnabled: true
+        # Record the following exceptions as failures
+        recordExceptions:
+          - org.springframework.web.client.HttpServerErrorException # 5xx errors
+          - org.springframework.web.client.ResourceAccessException # communication failure with the service
+          - java.io.IOException # I/O errors
+          - java.util.concurrent.TimeoutException # call took too long and failed
+  timelimiter:
+    instances:
+      accounts-service:
+        # Timeout duration for circuit breaker calls
+        # If a call to the accounts-service takes more than 3 seconds, it is automatically considered to have failed
+        timeoutDuration: 3s
+
