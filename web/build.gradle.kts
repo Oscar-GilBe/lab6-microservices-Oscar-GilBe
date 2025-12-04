@@ -17,4 +17,6 @@ dependencies {
     implementation(libs.spring.boot.starter.actuator)
     implementation(libs.spring.cloud.starter.netflix.eureka.client)
     implementation(libs.spring.cloud.starter.config)
+    implementation(libs.spring.cloud.starter.circuitbreaker.resilience4j)
+    implementation(libs.resilience4j.all)
 }
