@@ -1,5 +1,6 @@
 package web.config;
 
+import org.springframework.cloud.client.circuitbreaker.CircuitBreakerFactory;
 import org.springframework.cloud.client.loadbalancer.LoadBalanced;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -8,7 +9,8 @@ import web.service.WebAccountsService;
 
 /**
  * Configuration for the web service's interaction with other microservices.
- * This class demonstrates how to configure service discovery and client-side load balancing.
+ * This class demonstrates how to configure service discovery, client-side load balancing,
+ * and circuit breaker pattern for resilient microservices communication.
  *
  * @author Paul Chapman
  */
@@ -31,12 +33,14 @@ public class WebServerConfiguration {
 
     /**
      * The AccountService encapsulates the interaction with the micro-service.
+     * Moreover, it includes circuit breaker functionality for resilience.
      *
-     * @return A new service instance.
+     * @param circuitBreakerFactory Factory for creating circuit breaker instances
+     * @return A new service instance with circuit breaker protection
      */
     @Bean
-    public WebAccountsService accountsService() {
-        return new WebAccountsService(ACCOUNTS_SERVICE_URL, restTemplate());
+    public WebAccountsService accountsService(CircuitBreakerFactory circuitBreakerFactory) {
+        return new WebAccountsService(ACCOUNTS_SERVICE_URL, restTemplate(), circuitBreakerFactory);
     }
 
     /**
