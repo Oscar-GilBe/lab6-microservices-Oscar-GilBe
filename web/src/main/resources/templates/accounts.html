@@ -6,7 +6,8 @@
 
 <body>
 <h1>Accounts by Name</h1>
-<div class="error" th:if="not ${accounts}">
+<div class="error" th:if="${message}" th:text="${message}"></div>
+<div class="error" th:if="not ${accounts} and not ${message}">
     No accounts found containing '<span th:text="${search}">text</span>'.
     <div style="height: 2cm">&nbsp;</div>
 </div>

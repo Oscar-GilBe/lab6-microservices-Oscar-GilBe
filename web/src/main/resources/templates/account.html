@@ -7,7 +7,9 @@
 <body>
 <h1>Account Details</h1>
 
-<dl class="dl-horizontal">
+<div class="error" th:if="${message}" th:text="${message}"></div>
+
+<dl class="dl-horizontal" th:if="${account}">
     <dt>Number</dt>
     <dd th:text="${account.number}">number</dd>
     <dt>Owner</dt>
