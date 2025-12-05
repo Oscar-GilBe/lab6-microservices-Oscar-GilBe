@@ -337,29 +337,426 @@ In the context of this lab, the web service could kept trying to call the failed
 
 ---
 
-## 7. Conclusions
+## 7. Bonus: Circuit Breaker Pattern
 
-Summarize what you learned about:
+### Overview and Motivation
 
-- Microservices architecture
-- Service discovery with Eureka
-- System resilience and self-healing
-- Challenges you encountered and how you solved them
+The Circuit Breaker pattern is a critical **resilience pattern** in microservices architecture that prevents cascading failures when downstream services become unavailable. Implemented using **_Spring Cloud Circuit Breaker with Resilience4j_**, this pattern acts as a protective wrapper around service calls, monitoring for failures and automatically preventing further calls when a failure threshold is exceeded. This implementation demonstrates how modern microservices can provide graceful degradation and maintain partial functionality even when dependencies fail, significantly improving overall system reliability and user experience.
+
+### Circuit Breaker State Machine
+
+The circuit breaker operates as a **finite state machine** with three distinct states, each serving a specific purpose in the failure detection and recovery cycle:
+
+![Circuit Breaker State Machine](docs/screenshots/cb-state-machine.jpg)
+
+**CLOSED State (Normal Operation)**: In this initial state, all requests pass through to the accounts service normally. The circuit breaker monitors each call and maintains a sliding window of recent call outcomes. When the system is healthy, the circuit remains closed indefinitely, tracking success and failure rates but not interfering with normal operation. This state represents optimal system performance with full functionality available.
+
+**OPEN State (Failure Protection)**: When the **failure rate exceeds** the configured threshold (50% in our implementation) across the minimum number of calls (5 calls), the circuit transitions to the OPEN state. In this protective mode, all subsequent requests immediately fail without attempting to call the accounts service, instead throwing a `ServiceUnavailableException` that triggers fallback behavior. This "fail-fast" approach prevents resource exhaustion from timeout delays and protects the failing service from additional load that could delay its recovery. The circuit remains open for a configured wait duration (15 seconds), giving the downstream service time to recover.
+
+**HALF_OPEN State (Recovery Testing)**: After the wait duration elapses, the circuit **automatically** transitions to HALF_OPEN state to test whether the service has recovered. In this state, a limited number of test requests (3 in our configuration) are permitted to pass through to the accounts service. If all permitted calls succeed, the circuit assumes the service has recovered and transitions back to **CLOSED** state, restoring normal operation. However, if any of these test calls fail, the circuit immediately returns to **OPEN** state for another wait period. This cautious approach prevents premature recovery that could overwhelm a still-struggling service.
+
+The transitions between states are automatic and based on observed behavior rather than manual intervention, creating a self-healing system that can detect failures, protect against them, and automatically recover when conditions improve.
+
+### Implementation Challenges
+
+Implementing the circuit breaker revealed several subtle challenges that required careful analysis and configuration. The most significant difficulty involved properly structuring exception handling in `WebAccountsService.java` to **differentiate between business-level exceptions** (like `HttpClientErrorException.NotFound` for non-existent accounts) and **infrastructure failures** (like `ResourceAccessException` when the service is unavailable).
+
+Initially, the try-catch structure caught all exceptions inside the circuit breaker's lambda function, which caused Resilience4j to incorrectly count all responses as successful calls. This led to the circuit remaining closed even when the accounts service was completely unavailable. The solution required restructuring the code to catch only `HttpClientErrorException.NotFound` inside the lambda (returning `null` for business-level "not found" cases) while allowing all other exceptions to propagate outward, where they're caught and wrapped in `ServiceUnavailableException`.
+
+A second critical challenge emerged when the Spring Cloud LoadBalancer's `IllegalStateException` ("No instances available for ACCOUNTS-SERVICE") was **not being properly counted as a failure by the circuit breaker**. When Eureka eventually evicted the failed service instance from its registry, subsequent attempts to call the service threw `IllegalStateException` with such low latency (1-2ms) that the circuit breaker initially misclassified these as successful operations. This led to incorrect state transitions where the circuit would move from HALF_OPEN to CLOSED despite the service still being unavailable.
+
+The solution required explicit configuration in `application.yml` to register specific exception types as failures:
+
+```yaml
+resilience4j:
+  circuitbreaker:
+    instances:
+      accounts-service:
+        recordExceptions:
+          - org.springframework.web.client.HttpServerErrorException # 5xx errors
+          - org.springframework.web.client.ResourceAccessException # communication failure with the service
+          - java.io.IOException # I/O errors
+          - java.util.concurrent.TimeoutException # call took too long and failed
+          - java.lang.IllegalStateException # illegal state encountered
+          - org.springframework.web.client.RestClientException # generic REST client errors
+```
+
+This configuration ensures that both network-level failures (ResourceAccessException) and service discovery failures (IllegalStateException) are properly recorded as errors, allowing the circuit breaker to make correct state transition decisions even when dealing with quick-fail scenarios from the load balancer.
+
+### Demonstration of Circuit Breaker Behavior
+
+The following **actuator event logs** (obtained from executin `curl http://localhost:4444/actuator/circuitbreakerevents`) demonstrate a complete failure and recovery cycle, showing how the circuit breaker protects the system and automatically recovers when the service becomes available again.
+
+#### Phase 1: Normal Operation (CLOSED State)
+
+The system begins with a successful request while the accounts service is healthy:
+
+```json
+{
+  "circuitBreakerName": "accounts-service",
+  "type": "SUCCESS",
+  "creationTime": "2025-12-05T18:26:38.496081343Z[Etc/UTC]",
+  "errorMessage": null,
+  "durationInMs": 208,
+  "stateTransition": null
+}
+```
+
+This SUCCESS event shows the circuit breaker in CLOSED state, allowing requests to pass through normally. The 208ms duration indicates a healthy service response time.
+
+#### Phase 2: Service Failure Detection (CLOSED → OPEN Transition)
+
+At 18:26:48, the accounts service is stopped, causing subsequent requests to fail with connection errors:
+
+```json
+{
+    "circuitBreakerName": "accounts-service",
+    "type": "ERROR",
+    "creationTime": "2025-12-05T18:26:48.062103581Z[Etc/UTC]",
+    "errorMessage": "org.springframework.web.client.ResourceAccessException: I/O error on GET request for \"http://ACCOUNTS-SERVICE/accounts/12345678988\": Connection refused",
+    "durationInMs": 4,
+    "stateTransition": null
+},
+{
+    "circuitBreakerName": "accounts-service",
+    "type": "ERROR",
+    "creationTime": "2025-12-05T18:26:49.785219696Z[Etc/UTC]",
+    "errorMessage": "org.springframework.web.client.ResourceAccessException: I/O error on GET request for \"http://ACCOUNTS-SERVICE/accounts/12345678988\": Connection refused",
+    "durationInMs": 1,
+    "stateTransition": null
+},
+{
+    "circuitBreakerName": "accounts-service",
+    "type": "ERROR",
+    "creationTime": "2025-12-05T18:26:50.697281243Z[Etc/UTC]",
+    "errorMessage": "org.springframework.web.client.ResourceAccessException: I/O error on GET request for \"http://ACCOUNTS-SERVICE/accounts/12345678988\": Connection refused",
+    "durationInMs": 1,
+    "stateTransition": null
+},
+{
+    "circuitBreakerName": "accounts-service",
+    "type": "ERROR",
+    "creationTime": "2025-12-05T18:26:51.688009172Z[Etc/UTC]",
+    "errorMessage": "org.springframework.web.client.ResourceAccessException: I/O error on GET request for \"http://ACCOUNTS-SERVICE/accounts/12345678988\": Connection refused",
+    "durationInMs": 1,
+    "stateTransition": null
+}
+```
+
+After accumulating 4 consecutive ERROR events (reaching our `minimumNumberOfCalls: 5` threshold with one earlier SUCCESS), the circuit breaker calculates that the failure rate has exceeded 50%:
+
+```json
+{
+    "circuitBreakerName": "accounts-service",
+    "type": "FAILURE_RATE_EXCEEDED",
+    "creationTime": "2025-12-05T18:26:51.688452553Z[Etc/UTC]",
+    "errorMessage": null,
+    "durationInMs": null,
+    "stateTransition": null
+},
+{
+    "circuitBreakerName": "accounts-service",
+    "type": "STATE_TRANSITION",
+    "creationTime": "2025-12-05T18:26:51.691068145Z[Etc/UTC]",
+    "errorMessage": null,
+    "durationInMs": null,
+    "stateTransition": "CLOSED_TO_OPEN"
+}
+```
+
+The circuit now transitions to **_OPEN state_**, protecting the system from further failures.
+
+#### Phase 3: Protection Mode (OPEN State)
+
+With the circuit open, subsequent requests are immediately rejected without attempting to call the failing service:
+
+```json
+{
+    "circuitBreakerName": "accounts-service",
+    "type": "NOT_PERMITTED",
+    "creationTime": "2025-12-05T18:26:52.695211653Z[Etc/UTC]",
+    "errorMessage": null,
+    "durationInMs": null,
+    "stateTransition": null
+},
+{
+    "circuitBreakerName": "accounts-service",
+    "type": "NOT_PERMITTED",
+    "creationTime": "2025-12-05T18:27:03.083083271Z[Etc/UTC]",
+    "errorMessage": null,
+    "durationInMs": null,
+    "stateTransition": null
+},
+{
+    "circuitBreakerName": "accounts-service",
+    "type": "NOT_PERMITTED",
+    "creationTime": "2025-12-05T18:27:03.807997250Z[Etc/UTC]",
+    "errorMessage": null,
+    "durationInMs": null,
+    "stateTransition": null
+},
+{
+    "circuitBreakerName": "accounts-service",
+    "type": "NOT_PERMITTED",
+    "creationTime": "2025-12-05T18:27:04.571714577Z[Etc/UTC]",
+    "errorMessage": null,
+    "durationInMs": null,
+    "stateTransition": null
+}
+```
+
+These **_NOT_PERMITTED_** events demonstrate the "fail-fast" behavior: requests return immediately with fallback responses instead of waiting for connection timeouts. This protects both the calling service (by preventing resource exhaustion) and the failing service (by not overwhelming it with requests).
+
+#### Phase 4: First Recovery Attempt (OPEN → HALF_OPEN → OPEN)
+
+After the configured `waitDurationInOpenState: 15s`, the circuit automatically transitions to HALF_OPEN to test recovery:
+
+```json
+{
+  "circuitBreakerName": "accounts-service",
+  "type": "STATE_TRANSITION",
+  "creationTime": "2025-12-05T18:27:06.691688158Z[Etc/UTC]",
+  "errorMessage": null,
+  "durationInMs": null,
+  "stateTransition": "OPEN_TO_HALF_OPEN"
+}
+```
+
+The first test request still encounters a connection error (service remains down):
+
+```json
+{
+  "circuitBreakerName": "accounts-service",
+  "type": "ERROR",
+  "creationTime": "2025-12-05T18:27:08.283831141Z[Etc/UTC]",
+  "errorMessage": "org.springframework.web.client.ResourceAccessException: I/O error on GET request for \"http://ACCOUNTS-SERVICE/accounts/12345678988\": Connection refused",
+  "durationInMs": 1,
+  "stateTransition": null
+}
+```
+
+By this time (18:27:22), _Eureka has evicted the failed instance from its registry_. Subsequent test requests now receive **_`IllegalStateException`_** from the load balancer instead of connection errors:
+
+```json
+{
+    "circuitBreakerName": "accounts-service",
+    "type": "ERROR",
+    "creationTime": "2025-12-05T18:27:22.246013466Z[Etc/UTC]",
+    "errorMessage": "java.lang.IllegalStateException: No instances available for ACCOUNTS-SERVICE",
+    "durationInMs": 2,
+    "stateTransition": null
+},
+{
+    "circuitBreakerName": "accounts-service",
+    "type": "ERROR",
+    "creationTime": "2025-12-05T18:27:23.089725100Z[Etc/UTC]",
+    "errorMessage": "java.lang.IllegalStateException: No instances available for ACCOUNTS-SERVICE",
+    "durationInMs": 1,
+    "stateTransition": null
+}
+```
+
+Since test requests failed, the circuit returns to **_OPEN state_**:
+
+```json
+{
+  "circuitBreakerName": "accounts-service",
+  "type": "STATE_TRANSITION",
+  "creationTime": "2025-12-05T18:27:23.089799394Z[Etc/UTC]",
+  "errorMessage": null,
+  "durationInMs": null,
+  "stateTransition": "HALF_OPEN_TO_OPEN"
+}
+```
+
+This demonstrates the circuit breaker's conservative recovery strategy: it doesn't assume recovery until it observes successful calls.
+
+#### Phase 5: Subsequent Recovery Attempts
+
+The circuit continues its cycle of waiting 15 seconds in OPEN state (with NOT_PERMITTED events), then testing with HALF_OPEN:
+
+```json
+{
+  "circuitBreakerName": "accounts-service",
+  "type": "STATE_TRANSITION",
+  "creationTime": "2025-12-05T18:27:38.089962290Z[Etc/UTC]",
+  "errorMessage": null,
+  "durationInMs": null,
+  "stateTransition": "OPEN_TO_HALF_OPEN"
+}
+```
+
+Multiple test requests fail with `IllegalStateException`, causing the circuit to reopen:
+
+```json
+{
+    "circuitBreakerName": "accounts-service",
+    "type": "ERROR",
+    "creationTime": "2025-12-05T18:27:38.338262796Z[Etc/UTC]",
+    "errorMessage": "java.lang.IllegalStateException: No instances available for ACCOUNTS-SERVICE",
+    "durationInMs": 2,
+    "stateTransition": null
+},
+{
+    "circuitBreakerName": "accounts-service",
+    "type": "ERROR",
+    "creationTime": "2025-12-05T18:27:38.937911368Z[Etc/UTC]",
+    "errorMessage": "java.lang.IllegalStateException: No instances available for ACCOUNTS-SERVICE",
+    "durationInMs": 1,
+    "stateTransition": null
+},
+{
+    "circuitBreakerName": "accounts-service",
+    "type": "ERROR",
+    "creationTime": "2025-12-05T18:27:39.447619728Z[Etc/UTC]",
+    "errorMessage": "java.lang.IllegalStateException: No instances available for ACCOUNTS-SERVICE",
+    "durationInMs": 1,
+    "stateTransition": null
+}
+,
+{
+    "circuitBreakerName": "accounts-service",
+    "type": "STATE_TRANSITION",
+    "creationTime": "2025-12-05T18:27:39.447701356Z[Etc/UTC]",
+    "errorMessage": null,
+    "durationInMs": null,
+    "stateTransition": "HALF_OPEN_TO_OPEN"
+}
+```
+
+The pattern continues with another cycle at 18:27:54 ("OPEN_TO_HALF_OPEN" state transition). This demonstrates the circuit breaker's persistence in testing for recovery without human intervention.
+
+#### Phase 6: Service Recovery (HALF_OPEN → CLOSED Transition)
+
+At approximately 18:29:26, the accounts service is restarted. During the next HALF_OPEN test window (beginning at 18:29:41), the circuit breaker gets successful response:
+
+```json
+{
+    "circuitBreakerName": "accounts-service",
+    "type": "STATE_TRANSITION",
+    "creationTime": "2025-12-05T18:29:41.088939579Z[Etc/UTC]",
+    "errorMessage": null,
+    "durationInMs": null,
+    "stateTransition": "OPEN_TO_HALF_OPEN"
+},
+{
+    "circuitBreakerName": "accounts-service",
+    "type": "SUCCESS",
+    "creationTime": "2025-12-05T18:30:10.830757653Z[Etc/UTC]",
+    "errorMessage": null,
+    "durationInMs": 11,
+    "stateTransition": null
+},
+{
+    "circuitBreakerName": "accounts-service",
+    "type": "SUCCESS",
+    "creationTime": "2025-12-05T18:30:15.444271606Z[Etc/UTC]",
+    "errorMessage": null,
+    "durationInMs": 11,
+    "stateTransition": null
+},
+{
+    "circuitBreakerName": "accounts-service",
+    "type": "SUCCESS",
+    "creationTime": "2025-12-05T18:30:16.936795604Z[Etc/UTC]",
+    "errorMessage": null,
+    "durationInMs": 16,
+    "stateTransition": null
+}
+```
+
+After three consecutive successful test calls (matching our `permittedNumberOfCallsInHalfOpenState: 3` configuration), the circuit breaker confirms that the service has recovered and transitions back to **_CLOSED state_**:
+
+```json
+{
+  "circuitBreakerName": "accounts-service",
+  "type": "STATE_TRANSITION",
+  "creationTime": "2025-12-05T18:30:16.937157176Z[Etc/UTC]",
+  "errorMessage": null,
+  "durationInMs": null,
+  "stateTransition": "HALF_OPEN_TO_CLOSED"
+}
+```
+
+#### Phase 7: Normal Operation Restored
+
+With the circuit now CLOSED, all subsequent requests flow normally to the recovered accounts service:
+
+```json
+{
+    "circuitBreakerName": "accounts-service",
+    "type": "SUCCESS",
+    "creationTime": "2025-12-05T18:30:28.779592537Z[Etc/UTC]",
+    "errorMessage": null,
+    "durationInMs": 10,
+    "stateTransition": null
+},
+{
+    "circuitBreakerName": "accounts-service",
+    "type": "SUCCESS",
+    "creationTime": "2025-12-05T18:30:30.882262678Z[Etc/UTC]",
+    "errorMessage": null,
+    "durationInMs": 9,
+    "stateTransition": null
+}
+```
+
+The system has fully recovered and returned to normal operation without any manual intervention, demonstrating true self-healing capability.
+
+### Benefits and Lessons Learned
+
+This circuit breaker implementation provides several critical benefits for **system resilience**. The fail-fast behavior prevents thread pool exhaustion and cascading timeouts that could bring down the entire web service when the accounts service fails. Users receive immediate error messages with helpful suggestions rather than experiencing long timeout delays. The automatic recovery detection means the system heals itself when services come back online, without requiring manual intervention.
+
+The implementation revealed important insights about resilience patterns in distributed systems. **Proper exception classification** is crucial: distinguishing business-level exceptions (404 Not Found) from infrastructure failures (Connection Refused, No instances available) ensures accurate failure metrics. Configuration tuning requires careful **balance**: too-sensitive settings cause unnecessary circuit opening from transient errors, while too-tolerant settings fail to protect against real failures. Finally, comprehensive observability through actuator endpoints proved essential for understanding circuit breaker behavior and debugging configuration issues during development.
 
 ---
 
-## 8. AI Disclosure
+## 8. Conclusions
 
-**Did you use AI tools?** (ChatGPT, Copilot, Claude, etc.)
+### Understanding Microservices Architecture
 
-- If YES: Which tools? What did they help with? What did you do yourself?
-- If NO: Write "No AI tools were used."
+Through this laboratory experience, I gained practical insight into how microservices architecture fundamentally differs from monolithic application design. The key architectural principle demonstrated is the **decomposition of functionality into independently deployable services that communicate over the network**. Each service in this lab (the accounts service, web service, config server, and discovery server) operates as an autonomous unit with its own lifecycle, configuration, and deployment characteristics. This independence enables teams to develop, deploy, and scale services individually without affecting the entire system, providing significant advantages in terms of organizational scalability and technological flexibility.
 
-**Important**: Explain your own understanding of microservices patterns and Eureka behavior, even if AI helped you write parts of this report.
+The laboratory clearly illustrated the importance of **externalized configuration and centralized configuration** management through Spring Cloud Config. By separating configuration from code, microservices can adapt to different environments and change behavior without recompilation or redeployment. This separation of concerns is essential in microservices where dozens or hundreds of service instances might run across multiple environments simultaneously.
+
+### Service Discovery with Eureka
+
+Netflix Eureka proved to be a robust and elegant solution for service discovery in dynamic microservices environments. The practical exercises demonstrated how **Eureka eliminates the need for hardcoded service locations or static configuration files**, instead providing a **dynamic registry** that automatically tracks service availability. The registration process, where services announce themselves to Eureka upon startup and maintain their registration through periodic heartbeats, creates a self-maintaining catalog of available services.
+
+The **client-side discovery pattern** implemented by Eureka clients was particularly noteworthy. Rather than routing all service-to-service communication through a centralized load balancer, each client maintains a **cached copy of the registry** and makes intelligent **routing decisions locally**. This approach eliminates single points of failure and reduces network hops, though it introduces _eventual consistency_ considerations through the cache refresh mechanism. The `@LoadBalanced` RestTemplate integration demonstrated how seamlessly Spring Cloud abstracts this complexity, allowing developers to use logical service names in their code while the framework handles all discovery and load balancing transparently.
+
+### System Resilience and Self-Healing Capabilities
+
+One of the most impressive aspects of this microservices setup was observing the system's self-healing behavior in response to failures. When the accounts service instance on port 3333 was terminated, the system didn't require manual intervention to recover. The **failure detection mechanism** through missed heartbeats, automatic instance eviction from the registry, cache refresh on the client side, and automatic traffic rerouting to healthy instances all occurred automatically.
+
+This demonstrated a fundamental principle of resilient distributed systems: building systems that can **tolerate and recover from partial failures**. The presence of multiple service instances provided redundancy, ensuring that the failure of a single instance didn't result in complete service unavailability. The combination of Eureka's health monitoring and Spring Cloud LoadBalancer's intelligent routing created a system capable of degrading gracefully under failure conditions and recovering automatically when healthy instances become available.
+
+However, the lab also highlighted important limitations and tradeoffs. The recovery time depends heavily on configuration parameters like the **eviction interval and cache refresh rate**. Aggressive settings (like the 1-second eviction interval used in this lab) enable faster failure detection but increase system overhead. The client-side caching mechanism, while providing excellent performance, means there's always a window during which clients operate on potentially stale information, leading to temporary errors during failure scenarios.
+
+### Challenges and Solutions
+
+Several technical challenges emerged during the laboratory work that required careful analysis and problem-solving. In Codespaces, **port conflicts** required adjusting the accounts service configuration from the port 2222 to port 2223 was necessary because port 2222 was already in use by another process. This demonstrated the practical importance of externalized configuration, such changes could be made quickly in the configuration repository without touching the service code.
+
+**Understanding the timing and sequencing of service startup** was crucial. Services must start in the correct order: the config server must be running before other services attempt to fetch their configuration, and Eureka must be operational before services can register. Observing the startup logs and understanding the initialization sequence helped clarify the dependencies between components.
+
+Initially, understanding why the web service didn't immediately recover from the accounts service failure was confusing. However, analyzing the logs and understanding the client-side caching mechanism revealed that this delay was by design: a **tradeoff between performance and immediate consistency**. This insight into distributed systems behavior was valuable for understanding real-world microservices deployments.
+
+**_Circuit Breaker Implementation Challenges_**: Implementing the circuit breaker pattern as a bonus feature introduced significant technical complexity. The most challenging aspect involved **properly structuring exception handling** in the service layer to differentiate between business-level exceptions (HTTP 404 for non-existent accounts) and infrastructure failures (connection refused, service unavailable). Initially, catching all exceptions inside the circuit breaker's lambda function caused Resilience4j to misclassify legitimate business responses as successful calls, preventing the circuit from opening even when the service was completely down. The solution required careful refactoring to catch only `HttpClientErrorException.NotFound` within the lambda (treating 404 as a valid business case) while allowing infrastructure exceptions like `ResourceAccessException` to propagate outward for proper failure recording.
+
+A second critical challenge emerged when Spring Cloud LoadBalancer's `IllegalStateException` ("No instances available") was **not being counted as a failure** by the circuit breaker. After Eureka evicted the failed service instance from its registry, the LoadBalancer threw this exception so quickly (1-2ms) that the circuit breaker initially treated it as a successful operation, leading to incorrect state transitions. This required explicit configuration in `application.yml` to register `IllegalStateException`, `ResourceAccessException`, and other infrastructure exceptions as recordable failures, ensuring accurate circuit breaker metrics even in quick-fail scenarios.
+
+The laboratory successfully demonstrated that modern microservices frameworks like Spring Cloud provide powerful abstractions that handle much of the complexity of distributed systems, but understanding the underlying mechanisms (service registration, heartbeat monitoring, cache refresh cycles, load balancing algorithms, and resilience patterns) remains essential for building reliable, production-grade microservices architectures.
 
 ---
 
-## Additional Notes
+## 9. AI Disclosure
 
-Any other observations or comments about the assignment.
+**Did you use AI tools?** Yes
 
+**Tools Used**: ChatGPT
+
+**What AI helped with**:
+ChatGPT was used to assist with troubleshooting technical challenges, especially during the implementation of the circuit breaker bonus feature. AI also helped structure the Resilience4j configuration in YAML, provided guidance on organizing try-catch blocks to achieve the expected behavior, and suggested improvements for the clarity and readability of this report.
+
+**What I did myself**:
+I designed the overall circuit breaker implementation strategy; understood, selected and tuned the Resilience4j configuration parameters; and performed hands-on testing of the circuit breaker under various failure scenarios. Also, I analyzed the system's behavior, documented the actual results, and ensured the complete integration of the circuit breaker with the existing microservices architecture.

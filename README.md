@@ -77,7 +77,7 @@ See `docs/GUIDE.md` for detailed instructions.
 
 Complete **at least one** of the following tasks to earn a bonus (first submissions evaluated first):
 
-### 1. **Circuit Breaker Pattern**
+### 1. **Circuit Breaker Pattern** ✅
 
 - **Description**: Implement a circuit breaker for requests from the web service to the accounts service.
 - **Implementation**: Use [Spring Cloud Circuit Breaker](https://spring.io/guides/gs/cloud-circuit-breaker/) with Resilience4j to prevent cascading failures.
