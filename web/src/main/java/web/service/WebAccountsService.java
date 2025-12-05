@@ -88,25 +88,32 @@ public class WebAccountsService {
 
         logger.info("findByNumber() invoked: for " + accountNumber);
         
-        return circuitBreaker.run(
-            () -> {
-                try {
-                    return restTemplate.getForObject(serviceUrl + "/accounts/{number}",
-                            Account.class, accountNumber);
-                } catch (HttpClientErrorException.NotFound e) {
-                    // Account not found (404). This is a valid business case
-                    logger.info("Account " + accountNumber + " not found (404)");
-                    return null;
+        try {
+            return circuitBreaker.run(
+                () -> {
+                    logger.info("Circuit breaker EXECUTING call to accounts service for: " + accountNumber);
+                    try {
+                        Account result = restTemplate.getForObject(serviceUrl + "/accounts/{number}",
+                                Account.class, accountNumber);
+                        logger.info("SUCCESS: Got account from service: " + result);
+                        return result;
+                    } catch (HttpClientErrorException.NotFound e) {
+                        // Account not found (404). This is a valid business case, return null
+                        // This is the ONLY exception we catch inside the circuit breaker
+                        logger.info("Account " + accountNumber + " not found (404)");
+                        return null;
+                    }
+                    // All other exceptions (ResourceAccessException, IllegalStateException, etc.)
+                    // will bubble up to be caught by the outer catch block
                 }
-            },
-            // Fallback function. Called when circuit is OPEN or service fails
-            throwable -> {
-                logger.warning("Circuit breaker fallback for findByNumber(" + accountNumber + "): " + throwable.getMessage());
-                throw new ServiceUnavailableException("ACCOUNTS-SERVICE", 
-                    "Accounts service is temporarily unavailable. Please try again later.", 
-                    throwable);
-            }
-        );
+            );
+        } catch (Exception e) {
+            // Circuit breaker is OPEN or service call failed
+            logger.warning("Circuit breaker activated for findByNumber(" + accountNumber + "): " + e.getClass().getSimpleName() + " - " + e.getMessage());
+            throw new ServiceUnavailableException("ACCOUNTS-SERVICE", 
+                "Accounts service is temporarily unavailable. Please try again later.", 
+                e);
+        }
     }
 
     /**
@@ -125,30 +132,31 @@ public class WebAccountsService {
     public List<Account> byOwnerContains(String name) {
         logger.info("byOwnerContains() invoked:  for " + name);
         
-        return circuitBreaker.run(
-            () -> {
-                Account[] accounts = null;
-                try {
-                    accounts = restTemplate.getForObject(serviceUrl
-                            + "/accounts/owner/{name}", Account[].class, name);
-                } catch (HttpClientErrorException.NotFound e) { // 404
-                    // No accounts found (404). This is a valid business case
-                    logger.info("No accounts found for owner: " + name);
-                }
+        try {
+            return circuitBreaker.run(
+                () -> {
+                    Account[] accounts = null;
+                    try {
+                        accounts = restTemplate.getForObject(serviceUrl
+                                + "/accounts/owner/{name}", Account[].class, name);
+                    } catch (HttpClientErrorException.NotFound e) { // 404
+                        // No accounts found (404). This is a valid business case
+                        logger.info("No accounts found for owner: " + name);
+                    }
 
-                if (accounts == null || accounts.length == 0) {
-                    return null; // No accounts found
-                } else {
-                    return Arrays.asList(accounts);
+                    if (accounts == null || accounts.length == 0) {
+                        return null; // No accounts found
+                    } else {
+                        return Arrays.asList(accounts);
+                    }
                 }
-            },
-            // Fallback function. Called when circuit is OPEN or service fails
-            throwable -> {
-                logger.warning("Circuit breaker fallback for byOwnerContains(" + name + "): " + throwable.getMessage());
-                throw new ServiceUnavailableException("ACCOUNTS-SERVICE", 
-                    "Accounts service is temporarily unavailable. Please try again later.", 
-                    throwable);
-            }
-        );
+            );
+        } catch (Exception e) {
+            // Circuit breaker is OPEN or service call failed
+            logger.warning("Circuit breaker activated for byOwnerContains(" + name + "): " + e.getMessage());
+            throw new ServiceUnavailableException("ACCOUNTS-SERVICE", 
+                "Accounts service is temporarily unavailable. Please try again later.", 
+                e);
+        }
     }
 }

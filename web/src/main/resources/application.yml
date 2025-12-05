@@ -55,6 +55,8 @@ resilience4j:
           - org.springframework.web.client.ResourceAccessException # communication failure with the service
           - java.io.IOException # I/O errors
           - java.util.concurrent.TimeoutException # call took too long and failed
+          - java.lang.IllegalStateException # illegal state encountered
+          - org.springframework.web.client.RestClientException # generic REST client errors
   timelimiter:
     instances:
       accounts-service:
